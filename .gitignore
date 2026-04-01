@@ -1,0 +1,41 @@
+# Secrets & credentials (never commit these)
+.env
+.env.*
+!.env.example
+*.secret
+client_secret*
+tokens.json
+token_cache*
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+*.url
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude Code
+.claude/
+
+# Generated output (HTML reports, ML export data — contain your Spotify data)
+reports/
+*.json
