@@ -38,4 +38,6 @@ desktop.ini
 
 # Generated output (HTML reports, ML export data — contain your Spotify data)
 reports/
+output/
+exports/
 *.json

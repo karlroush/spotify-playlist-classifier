@@ -1,3 +1,5 @@
+[pulled from https://developer.spotify.com/documentation/web-api/tutorials/building-with-ai]
+
 You are helping me build an application using the Spotify Web API. Follow these rules:
 
 - OpenAPI spec: Refer to the Spotify OpenAPI specification at https://developer.spotify.com/reference/web-api/open-api-schema.yaml for all endpoint paths, parameters, and response schemas. Do not guess endpoints or field names.
