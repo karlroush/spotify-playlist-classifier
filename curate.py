@@ -78,14 +78,10 @@ def _fmt_ms(ms: float) -> str:
 
 
 _FLAG_LABELS: list[tuple[str, str]] = [
-    ("genre_outlier", "genre"),
-    ("vibe_outlier", "vibe"),
+    ("tag_outlier", "tags"),
     ("year_outlier", "era"),
-    ("popularity_outlier", "pop"),
     ("duration_outlier", "dur"),
     ("explicit_outlier", "explicit"),
-    ("artist_popularity_outlier", "artpop"),
-    ("tempo_outlier", "tempo"),
 ]
 
 
@@ -97,33 +93,26 @@ def _render_track(track: dict, idx: int, total: int, profile: dict) -> None:
     flags = track["statistical_flags"]
 
     active_flags = " ".join(lbl for key, lbl in _FLAG_LABELS if flags.get(key))
-    fit = feat.get("fit_score", 0.0)
 
     print(f"\n[{idx}/{total}]  {name}  —  {artists}")
-    print(f"  Fit: {fit:.2f}  |  Flags: {active_flags or '(none)'}")
+    print(f"  Flags: {active_flags or '(none)'}")
 
     # Contextual detail lines for each active flag
-    if flags.get("genre_outlier") and feat.get("genres"):
-        top_pl = [g for g, _ in profile.get("top_genres", [])[:3]]
-        print(f"  Genre:    track [{', '.join(feat['genres'][:3])}]  "
-              f"vs playlist [{', '.join(top_pl)}]")
-
-    if flags.get("vibe_outlier") and feat.get("energy_tier"):
-        print(f"  Vibe:     {feat['energy_tier']} energy  "
-              f"in a {profile.get('dominant_energy_tier', '?')} energy playlist")
+    if flags.get("tag_outlier"):
+        tags = feat.get("tags", {})
+        if tags:
+            top_tags = sorted(tags.items(), key=lambda x: x[1], reverse=True)[:5]
+            tag_str = ", ".join(f"{n} ({w:.0%})" for n, w in top_tags)
+            print(f"  Tags:     [{tag_str}] — flagged by Isolation Forest")
+        else:
+            print(f"  Tags:     (no tags) — flagged by Isolation Forest")
 
     if flags.get("year_outlier") and feat.get("release_year") is not None:
         ym = profile.get("year_median")
         ys = profile.get("year_stddev")
         median_str = f"playlist median {int(ym)}" if ym is not None else ""
-        stddev_str = f" (±{ys:.1f} yrs)" if ys is not None else ""
+        stddev_str = f" (\u00b1{ys:.1f} yrs)" if ys is not None else ""
         print(f"  Era:      released {feat['release_year']}  —  {median_str}{stddev_str}")
-
-    if flags.get("popularity_outlier") and feat.get("popularity") is not None:
-        pm = profile.get("popularity_median")
-        direction = "popular" if pm is not None and feat["popularity"] > pm else "obscure"
-        median_str = f"playlist median {pm:.0f}" if pm is not None else ""
-        print(f"  Pop:      {feat['popularity']}/100  —  {median_str}  (more {direction})")
 
     if flags.get("duration_outlier") and feat.get("duration_ms") is not None:
         dm = profile.get("duration_median_ms")
@@ -135,17 +124,6 @@ def _render_track(track: dict, idx: int, total: int, profile: dict) -> None:
         ratio = profile.get("explicit_ratio", 0)
         lean = "mostly clean" if ratio < 0.15 else "mostly explicit"
         print(f"  Explicit: track is {status} in a {lean} playlist ({ratio:.0%} explicit)")
-
-    if flags.get("artist_popularity_outlier") and feat.get("artist_popularity") is not None:
-        apm = profile.get("artist_popularity_median")
-        direction = "mainstream" if apm is not None and feat["artist_popularity"] > apm else "underground"
-        median_str = f"playlist median {apm:.0f}" if apm is not None else ""
-        print(f"  Artist:   pop {feat['artist_popularity']:.0f}/100  —  {median_str}  (more {direction})")
-
-    if flags.get("tempo_outlier") and feat.get("tempo") is not None:
-        tm = profile.get("tempo_median")
-        median_str = f"playlist median {tm:.0f} BPM" if tm is not None else ""
-        print(f"  Tempo:    {feat['tempo']:.0f} BPM  —  {median_str}")
 
     confirmed = track.get("confirmed_outlier")
     if confirmed is not None:
@@ -163,8 +141,8 @@ def _tracks_to_review(
     re_review: bool,
 ) -> list[dict]:
     """
-    Return tracks to review, ordered: suggested outliers first (by fit score
-    ascending), then non-suggested (by fit score ascending) if include_all.
+    Return tracks to review, ordered: suggested outliers first (by flag count
+    descending), then non-suggested if include_all.
     Skips already-labeled tracks unless re_review is set.
     """
     def _eligible(t: dict) -> bool:
@@ -172,16 +150,22 @@ def _tracks_to_review(
             return True
         return t.get("confirmed_outlier") is None
 
+    def _flag_count(t: dict) -> int:
+        flags = t.get("statistical_flags", {})
+        return sum(1 for key, _ in _FLAG_LABELS if flags.get(key))
+
     suggested = sorted(
         [t for t in tracks if t.get("suggested_outlier") and _eligible(t)],
-        key=lambda t: t["features"].get("fit_score", 0.0),
+        key=_flag_count,
+        reverse=True,
     )
     if not include_all:
         return suggested
 
     non_suggested = sorted(
         [t for t in tracks if not t.get("suggested_outlier") and _eligible(t)],
-        key=lambda t: t["features"].get("fit_score", 0.0),
+        key=_flag_count,
+        reverse=True,
     )
     return suggested + non_suggested
 
@@ -212,11 +196,11 @@ def _curate_playlist(
     total_reviewed_before = sum(1 for t in tracks if t.get("confirmed_outlier") is not None)
     total_tracks = len(tracks)
 
-    print(f"\n{'═' * w}")
+    print(f"\n{'\u2550' * w}")
     print(f" PLAYLIST: {name}  "
           f"({total_reviewed_before}/{total_tracks} already labeled, "
           f"{len(queue)} to review now)")
-    print(f"{'═' * w}")
+    print(f"{'\u2550' * w}")
     print("  Keys:  [y] outlier   [n] not an outlier   [s] skip   [p] next playlist   [q] quit")
 
     # Build a lookup so we can find and update tracks by track_id
@@ -234,29 +218,26 @@ def _curate_playlist(
             if key == "y":
                 track_lookup[track["track_id"]]["confirmed_outlier"] = True
                 confirmed_yes += 1
-                print("y  → outlier")
+                print("y  \u2192 outlier")
                 _save(all_data, export_path)
                 break
             elif key == "n":
                 track_lookup[track["track_id"]]["confirmed_outlier"] = False
                 confirmed_no += 1
-                print("n  → not an outlier")
+                print("n  \u2192 not an outlier")
                 _save(all_data, export_path)
                 break
             elif key == "s":
                 skipped += 1
-                print("s  → skipped")
+                print("s  \u2192 skipped")
                 break
             elif key == "p":
-                print("p  → next playlist")
+                print("p  \u2192 next playlist")
                 return confirmed_yes, confirmed_no, skipped, False
             elif key == "q":
-                print("q  → quit")
+                print("q  \u2192 quit")
                 return confirmed_yes, confirmed_no, skipped, True
             # any other key: re-prompt silently
-
-        if key == "q":
-            return confirmed_yes, confirmed_no, skipped, True
 
     return confirmed_yes, confirmed_no, skipped, False
 
@@ -313,9 +294,9 @@ def main() -> None:
 
     # Summary
     w = _width()
-    print(f"\n{'─' * w}")
+    print(f"\n{'\u2500' * w}")
     print(f" Session summary")
-    print(f"{'─' * w}")
+    print(f"{'\u2500' * w}")
     print(f"  Confirmed outliers:     {total_yes}")
     print(f"  Confirmed not outliers: {total_no}")
     print(f"  Skipped:                {total_skipped}")

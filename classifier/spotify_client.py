@@ -75,15 +75,23 @@ class SpotifyClient:
     # Public API
     # -----------------------------------------------------------------------
 
+    def get_current_user_id(self) -> str:
+        """Return the current user's Spotify user ID."""
+        data = self._get(f"{SPOTIFY_API_BASE}/me")
+        return data["id"]
+
     def get_user_playlists(self) -> list[dict]:
-        """Return all playlists for the current user (all pages)."""
+        """Return playlists owned by the current user (all pages)."""
+        user_id = self.get_current_user_id()
         playlists: list[dict] = []
         url = f"{SPOTIFY_API_BASE}/me/playlists"
         params: dict = {"limit": 50}
 
         while url:
             data = self._get(url, params if "?" not in url else None)
-            playlists.extend(data.get("items") or [])
+            for pl in data.get("items") or []:
+                if (pl.get("owner") or {}).get("id") == user_id:
+                    playlists.append(pl)
             url = data.get("next") or ""
             params = {}
 
@@ -101,7 +109,7 @@ class SpotifyClient:
         params: dict = {
             "limit": 100,
             "fields": (
-                "next,items(track(id,name,popularity,explicit,duration_ms,"
+                "next,items(added_at,item(id,name,explicit,duration_ms,type,"
                 "artists(id,name),album(release_date)))"
             ),
         }
@@ -109,13 +117,14 @@ class SpotifyClient:
         while url:
             data = self._get(url, params if "?" not in url else None)
             for item in data.get("items") or []:
-                track = item.get("track")
+                track = item.get("item")
                 if not track:
                     continue
                 if track.get("type") == "episode":
                     continue
                 if not track.get("id"):
                     continue
+                track["added_at"] = item.get("added_at")
                 tracks.append(track)
             url = data.get("next") or ""
             params = {}
@@ -138,15 +147,14 @@ class SpotifyClient:
                 for aid in artist_ids}
 
     def _fetch_artists_batch(self, ids: list[str]) -> None:
-        """Fetch one batch of up to 50 artists and populate cache."""
-        url = f"{SPOTIFY_API_BASE}/artists"
-        data = self._get(url, {"ids": ",".join(ids)})
-        for artist in data.get("artists") or []:
-            if artist and artist.get("id"):
-                self._artist_cache[artist["id"]] = {
-                    "genres": artist.get("genres") or [],
-                    "popularity": artist.get("popularity"),
-                    "followers": (artist.get("followers") or {}).get("total"),
+        """Fetch artists individually and populate cache."""
+        for artist_id in ids:
+            data = self._get(f"{SPOTIFY_API_BASE}/artists/{artist_id}")
+            if data and data.get("id"):
+                self._artist_cache[data["id"]] = {
+                    "genres": data.get("genres") or [],
+                    "popularity": data.get("popularity"),
+                    "followers": (data.get("followers") or {}).get("total"),
                 }
 
     def get_audio_analysis(self, track_id: str) -> dict | None:

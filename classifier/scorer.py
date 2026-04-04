@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from profiler import PlaylistProfile, TrackData
+from .profiler import PlaylistProfile, TrackData
 
 
 # ---------------------------------------------------------------------------
@@ -12,16 +12,93 @@ from profiler import PlaylistProfile, TrackData
 @dataclass
 class ScoredTrack:
     track: TrackData
-    fit_score: float
-    is_genre_outlier: bool
+    is_tag_outlier: bool
     is_year_outlier: bool
-    is_vibe_outlier: bool
-    is_popularity_outlier: bool
     is_duration_outlier: bool
     is_explicit_outlier: bool
-    is_artist_popularity_outlier: bool
-    is_tempo_outlier: bool
     explanation: str
+
+
+# ---------------------------------------------------------------------------
+# Tag vector helpers
+# ---------------------------------------------------------------------------
+
+def build_tag_vectors(
+    tracks: list[TrackData],
+) -> tuple[list[str], dict[str, list[float]]]:
+    """
+    Build tag vectors from ALL tracks (full vocabulary).
+    Returns (vocabulary, {track_id: vector}).
+    Only includes classifiable tracks (those with tags).
+    """
+    # Build vocabulary from all classifiable tracks
+    vocab_set: set[str] = set()
+    classifiable = [t for t in tracks if not t.unclassifiable]
+    for t in classifiable:
+        vocab_set.update(t.tags.keys())
+
+    vocabulary = sorted(vocab_set)
+    if not vocabulary:
+        return vocabulary, {}
+
+    vectors: dict[str, list[float]] = {}
+    for t in classifiable:
+        vectors[t.id] = [t.tags.get(tag, 0.0) for tag in vocabulary]
+
+    return vocabulary, vectors
+
+
+def run_isolation_forest(
+    tracks: list[TrackData],
+    vocabulary: list[str],
+    vectors: dict[str, list[float]],
+    contamination: float = 0.16,
+    score_gate: float = -0.05,
+) -> dict[str, bool]:
+    """
+    Train Isolation Forest on oldest max(20%, 35) tracks, predict all.
+    Returns {track_id: is_outlier}.
+
+    contamination sets the maximum outlier fraction (upper bound, not guarantee).
+    score_gate suppresses borderline predictions: tracks flagged by contamination
+    but with a decision_function score above score_gate are not marked as outliers.
+    Scores are negative-is-anomalous; 0 is the decision boundary.
+    """
+    classifiable = [t for t in tracks if not t.unclassifiable and t.id in vectors]
+
+    # Edge case: too few tracks for meaningful IF
+    if len(classifiable) < 2 or not vocabulary:
+        return {t.id: False for t in classifiable}
+
+    # Sort by added_at ascending; None sorts last
+    sorted_tracks = sorted(
+        classifiable,
+        key=lambda t: t.added_at or "9999-12-31T23:59:59Z",
+    )
+
+    training_size = max(int(0.2 * len(sorted_tracks)), 35)
+    training_size = min(training_size, len(sorted_tracks))
+    training_ids = {t.id for t in sorted_tracks[:training_size]}
+
+    training_vectors = [vectors[t.id] for t in sorted_tracks if t.id in training_ids]
+    all_vectors = [vectors[t.id] for t in classifiable]
+    all_ids = [t.id for t in classifiable]
+
+    from sklearn.ensemble import IsolationForest
+
+    model = IsolationForest(
+        contamination=contamination,
+        random_state=42,
+    )
+    model.fit(training_vectors)
+    predictions = model.predict(all_vectors)
+    scores = model.decision_function(all_vectors)
+
+    # -1 = outlier, 1 = inlier; suppress borderline outliers via score_gate
+    return {
+        tid: bool(pred == -1 and score <= score_gate)
+        for tid, pred, score in zip(all_ids, predictions, scores)
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -40,13 +117,6 @@ def _stddev_outlier(
     return abs(value - median) > threshold * stddev
 
 
-def _compute_fit_score(track: TrackData, profile: PlaylistProfile) -> float:
-    if not track.genres:
-        return 0.0
-    total = sum(profile.genre_weights.get(g, 0.0) for g in track.genres)
-    return total / max(len(track.genres), 1)
-
-
 def _compute_explicit_outlier(track: TrackData, profile: PlaylistProfile) -> bool:
     """
     Flag if the track's explicit status is inconsistent with the playlist norm.
@@ -62,31 +132,35 @@ def _compute_explicit_outlier(track: TrackData, profile: PlaylistProfile) -> boo
 def _build_explanation(track: TrackData, profile: PlaylistProfile, scored: ScoredTrack) -> str:
     parts: list[str] = []
 
-    if scored.is_genre_outlier:
-        playlist_top = [g for g, _ in profile.top_genres[:3]]
-        parts.append(
-            f"Genre: [{', '.join(track.genres[:3]) or 'none'}] "
-            f"vs playlist: [{', '.join(playlist_top)}]"
-        )
-
-    if scored.is_vibe_outlier:
-        parts.append(
-            f"Vibe: {track.energy_tier} energy genres "
-            f"in a {profile.dominant_energy_tier} energy playlist"
-        )
+    if scored.is_tag_outlier:
+        avg = profile.tag_averages
+        distinctive = sorted(
+            [(tag, w, w - avg.get(tag, 0.0)) for tag, w in track.tags.items()
+             if w - avg.get(tag, 0.0) >= 0.25],
+            key=lambda x: x[2], reverse=True,
+        )[:3]
+        missing = sorted(
+            [(tag, avg_w) for tag, avg_w in avg.items()
+             if avg_w >= 0.35 and track.tags.get(tag, 0.0) <= 0.05],
+            key=lambda x: x[1], reverse=True,
+        )[:3]
+        if distinctive or missing:
+            expl_parts = []
+            if distinctive:
+                expl_parts.append("has [" + ", ".join(f"{t} ({w:.0%})" for t, w, _ in distinctive) + "]")
+            if missing:
+                expl_parts.append("lacks [" + ", ".join(f"{t} ({a:.0%} avg)" for t, a in missing) + "]")
+            parts.append("Tags: " + " \u00b7 ".join(expl_parts))
+        else:
+            top_tags = sorted(track.tags.items(), key=lambda x: x[1], reverse=True)[:5]
+            tag_str = ", ".join(f"{name} ({w:.0%})" for name, w in top_tags)
+            parts.append(f"Tags: [{tag_str}] — atypical combination for this playlist")
 
     if scored.is_year_outlier and track.release_year is not None:
         parts.append(
             f"Era: released {track.release_year} — "
             f"playlist median {int(profile.year_median)} "  # type: ignore[arg-type]
-            f"(±{profile.year_stddev:.1f} yrs)"
-        )
-
-    if scored.is_popularity_outlier and track.popularity is not None:
-        direction = "popular" if track.popularity > (profile.popularity_median or 0) else "obscure"
-        parts.append(
-            f"Popularity: {track.popularity}/100 — playlist median "
-            f"{profile.popularity_median:.0f} (track is more {direction})"
+            f"(\u00b1{profile.year_stddev:.1f} yrs)"
         )
 
     if scored.is_duration_outlier and track.duration_ms is not None:
@@ -105,19 +179,6 @@ def _build_explanation(track: TrackData, profile: PlaylistProfile, scored: Score
             f"playlist ({ratio_pct:.0f}% explicit)"
         )
 
-    if scored.is_artist_popularity_outlier and track.artist_popularity is not None:
-        direction = "mainstream" if track.artist_popularity > (profile.artist_popularity_median or 0) else "underground"
-        parts.append(
-            f"Artist: popularity {track.artist_popularity:.0f}/100 — playlist median "
-            f"{profile.artist_popularity_median:.0f} (more {direction})"
-        )
-
-    if scored.is_tempo_outlier and track.tempo is not None:
-        parts.append(
-            f"Tempo: {track.tempo:.0f} BPM — playlist median "
-            f"{profile.tempo_median:.0f} BPM"
-        )
-
     return "\n       ".join(parts) if parts else "No specific flags"
 
 
@@ -128,69 +189,48 @@ def _build_explanation(track: TrackData, profile: PlaylistProfile, scored: Score
 def score_tracks(
     tracks: list[TrackData],
     profile: PlaylistProfile,
-    outlier_percentile: float = 20.0,
+    tag_outliers: dict[str, bool],
     year_threshold: float = 1.5,
-    popularity_threshold: float = 1.5,
     duration_threshold: float = 1.5,
-    artist_popularity_threshold: float = 1.5,
-    tempo_threshold: float = 1.5,
 ) -> list[ScoredTrack]:
     """
     Score all classifiable tracks. Returns ScoredTrack list.
-    Callers can zero out individual flag fields to disable specific detections.
+    tag_outliers comes from run_isolation_forest().
     Returns empty list (with warning) if all tracks are unclassifiable.
     """
     classifiable = [t for t in tracks if not t.unclassifiable]
 
     if not classifiable:
-        print("WARNING: All tracks in this playlist are unclassifiable (no genre data). "
+        print("WARNING: All tracks in this playlist are unclassifiable (no tag data). "
               "Skipping scoring.")
         return []
 
-    # Genre fit scores
-    raw_scores: list[tuple[TrackData, float]] = [
-        (t, _compute_fit_score(t, profile)) for t in classifiable
-    ]
-    sorted_scores = sorted(raw_scores, key=lambda x: x[1])
-    cutoff_index = max(0, int(len(sorted_scores) * outlier_percentile / 100) - 1)
-    cutoff_score = sorted_scores[cutoff_index][1] if sorted_scores else 0.0
-
     results: list[ScoredTrack] = []
-    for track, fit in raw_scores:
+    for track in classifiable:
         stub = ScoredTrack(
             track=track,
-            fit_score=fit,
-            is_genre_outlier=fit <= cutoff_score,
+            is_tag_outlier=tag_outliers.get(track.id, False),
             is_year_outlier=_stddev_outlier(
                 float(track.release_year) if track.release_year else None,
                 profile.year_median, profile.year_stddev, year_threshold,
-            ),
-            is_vibe_outlier=(
-                track.energy_tier is not None
-                and profile.dominant_energy_tier is not None
-                and track.energy_tier != profile.dominant_energy_tier
-            ),
-            is_popularity_outlier=_stddev_outlier(
-                float(track.popularity) if track.popularity is not None else None,
-                profile.popularity_median, profile.popularity_stddev, popularity_threshold,
             ),
             is_duration_outlier=_stddev_outlier(
                 float(track.duration_ms) if track.duration_ms is not None else None,
                 profile.duration_median, profile.duration_stddev, duration_threshold,
             ),
             is_explicit_outlier=_compute_explicit_outlier(track, profile),
-            is_artist_popularity_outlier=_stddev_outlier(
-                track.artist_popularity,
-                profile.artist_popularity_median, profile.artist_popularity_stddev,
-                artist_popularity_threshold,
-            ),
-            is_tempo_outlier=_stddev_outlier(
-                track.tempo,
-                profile.tempo_median, profile.tempo_stddev, tempo_threshold,
-            ),
             explanation="",
         )
-        stub.explanation = _build_explanation(track, profile, stub)
         results.append(stub)
 
     return results
+
+
+def build_explanations(scored: list[ScoredTrack], profile: PlaylistProfile) -> None:
+    """
+    Populate explanation strings based on current flag state.
+    Must be called after _disable_flags() so that disabled detectors are not
+    mentioned in the text shown to the user.
+    """
+    for st in scored:
+        st.explanation = _build_explanation(st.track, profile, st)

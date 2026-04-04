@@ -4,8 +4,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from profiler import PlaylistProfile, TrackData
-from scorer import ScoredTrack
+from .profiler import PlaylistProfile, TrackData
+from .scorer import ScoredTrack
 
 
 def build_playlist_export(
@@ -24,34 +24,21 @@ def build_playlist_export(
     profile_data = {
         "total_tracks": profile.total_tracks,
         "classifiable_count": profile.classifiable_count,
-        "genre_weights": profile.genre_weights,
-        "top_genres": [[g, round(w, 4)] for g, w in profile.top_genres],
-        "dominant_energy_tier": profile.dominant_energy_tier,
         "year_median": profile.year_median,
         "year_stddev": profile.year_stddev,
-        "popularity_median": profile.popularity_median,
-        "popularity_stddev": profile.popularity_stddev,
         "duration_median_ms": profile.duration_median,
         "duration_stddev_ms": profile.duration_stddev,
         "explicit_ratio": round(profile.explicit_ratio, 4),
-        "artist_popularity_median": profile.artist_popularity_median,
-        "artist_popularity_stddev": profile.artist_popularity_stddev,
-        "tempo_median": profile.tempo_median,
-        "tempo_stddev": profile.tempo_stddev,
     }
 
     tracks_data = []
     for st in scored_tracks:
         t = st.track
         flags = {
-            "genre_outlier": st.is_genre_outlier,
-            "vibe_outlier": st.is_vibe_outlier,
+            "tag_outlier": st.is_tag_outlier,
             "year_outlier": st.is_year_outlier,
-            "popularity_outlier": st.is_popularity_outlier,
             "duration_outlier": st.is_duration_outlier,
             "explicit_outlier": st.is_explicit_outlier,
-            "artist_popularity_outlier": st.is_artist_popularity_outlier,
-            "tempo_outlier": st.is_tempo_outlier,
         }
         suggested = any(flags.values())
         tracks_data.append({
@@ -59,16 +46,10 @@ def build_playlist_export(
             "track_name": t.name,
             "artist_names": t.artist_names,
             "features": {
-                "popularity": t.popularity,
                 "duration_ms": t.duration_ms,
                 "explicit": t.explicit,
                 "release_year": t.release_year,
-                "genres": t.genres,
-                "energy_tier": t.energy_tier,
-                "artist_popularity": t.artist_popularity,
-                "artist_followers": t.artist_followers,
-                "tempo": t.tempo,
-                "fit_score": round(st.fit_score, 4),
+                "tags": t.tags,
             },
             "statistical_flags": flags,
             "suggested_outlier": suggested,
