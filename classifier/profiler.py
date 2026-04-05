@@ -35,6 +35,7 @@ class PlaylistProfile:
     classifiable_count: int
     unclassifiable_tracks: list[TrackData] = field(default_factory=list)
     tag_averages: dict[str, float] = field(default_factory=dict)  # mean weight per tag across classifiable tracks
+    description: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -104,6 +105,7 @@ def build_playlist_profile(
     playlist_id: str,
     playlist_name: str,
     tracks: list[TrackData],
+    description: str = "",
 ) -> PlaylistProfile:
     """
     Derive profile stats from track list.
@@ -141,4 +143,5 @@ def build_playlist_profile(
         classifiable_count=n,
         unclassifiable_tracks=unclassifiable,
         tag_averages=tag_averages,
+        description=description,
     )

@@ -15,7 +15,7 @@ from pathlib import Path
 
 SPOTIFY_AUTH_URL = "https://accounts.spotify.com/authorize"
 SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
-SCOPE = "playlist-read-private"
+SCOPE = "playlist-read-private playlist-modify-public playlist-modify-private"
 
 
 # ---------------------------------------------------------------------------

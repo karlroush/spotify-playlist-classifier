@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import html as html_module
 import json
 import os
 import re
@@ -303,7 +304,8 @@ def main() -> None:
 
             lastfm.save_cache()
             tracks = build_track_data(raw_tracks, track_tags)
-            profile = build_playlist_profile(pl_id, pl_name, tracks)
+            pl_description = html_module.unescape(playlist.get("description") or "")
+            profile = build_playlist_profile(pl_id, pl_name, tracks, description=pl_description)
 
             # Build tag vectors and run Isolation Forest
             vocabulary, vectors = build_tag_vectors(tracks)
