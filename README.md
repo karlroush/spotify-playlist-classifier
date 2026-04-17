@@ -1,156 +1,175 @@
 # Spotify Playlist Outlier Analyzer
 
-Analyzes your Spotify playlists and identifies tracks that don't fit each playlist's theme, using Last.fm tag-based genre fingerprinting and Isolation Forest anomaly detection.
+Identifies tracks that don't fit each playlist's theme using **Last.fm tag-based genre fingerprinting** and **4-signal anomaly detection**: tags (Isolation Forest), era, duration, and explicit ratio.
 
-## How It Works
+## Quick Start
 
-1. **Fetches playlists and tracks** from the Spotify API
-2. **Fetches genre tags** for each artist and track from Last.fm (`artist.getTopTags` + `track.getTopTags`), merged by max weight and normalized to 0–1
-3. **Builds tag vectors** for every classifiable track and trains an Isolation Forest on the oldest-added tracks (assumed to represent the playlist's core intent)
-4. **Scores all tracks** — tags (Isolation Forest), duration, and optionally year/explicit
-5. **Saves reports** to `output/` (HTML by default; use `--format md|txt` to change) and prints a text summary to the terminal
+### Setup (one time)
 
-A track is flagged as an outlier if it triggers any active detector. Tracks with no Last.fm tag data are excluded from scoring and listed separately. Confirmed false positives from a prior curation session are suppressed automatically (see [Correction Pipeline](#correction-pipeline)).
+**1. Get credentials**
 
-## Setup
+- [Spotify Developer Dashboard](https://developer.spotify.com/dashboard): Create an app, add redirect URI `http://127.0.0.1:8888/callback`, copy **Client ID**
+- [last.fm/api/account/create](https://www.last.fm/api/account/create): Create API account (free), copy **API key**
 
-### 1. Get a Spotify Client ID
-
-1. Go to the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)
-2. Create a new app
-3. Under **Redirect URIs**, add: `http://127.0.0.1:8888/callback`
-4. Copy your **Client ID**
-
-### 2. Get a Last.fm API key
-
-1. Go to [last.fm/api/account/create](https://www.last.fm/api/account/create)
-2. Create an API account (free, personal use permitted)
-3. Copy your **API key**
-
-### 3. Configure credentials
+**2. Configure**
 
 ```bash
 cp .env.example .env
-```
-
-Edit `.env`:
-
-```
-SPOTIFY_CLIENT_ID=your_client_id_here
-LASTFM_API_KEY=your_lastfm_api_key_here
-```
-
-### 4. Install dependencies
-
-```bash
+# Edit .env with your Client ID and Last.fm API key
 pip install -r requirements.txt
 ```
 
-## Usage
+First run opens your browser for Spotify OAuth. Token is cached locally; silently refreshed on subsequent runs.
+
+### Analyze playlists
 
 ```bash
-python main.py
+python main.py                          # Interactive playlist selection
+python main.py --all                    # Analyze all playlists
+python main.py --all --export-dir exports/  # Save ML training exports
 ```
 
-Run without options for interactive playlist selection. Reports are saved to `output/` as HTML and printed to the terminal.
+Reports saved to `output/` as HTML (default). Add `--format md|txt` to change.
 
-### Options
+## Detection Signals
 
-| Flag | Description |
-|------|-------------|
-| `--all` | Analyze all playlists |
-| `--playlist ID` | Analyze a specific playlist by ID (repeatable) |
-| `--output-dir DIR` | Save reports here (default: `output/`) |
-| `--format html\|md\|txt` | Saved report format (default: `html`) |
-| `--export-dir DIR` | Save per-playlist ML training exports here; reads confirmed labels on re-run to suppress false positives |
-| `--if-contamination FLOAT` | Isolation Forest contamination parameter (default: `0.05`) |
-| `--duration-threshold FLOAT` | Stddev multiplier for duration outliers (default: `2.0`) |
-| `--year` | Enable era outlier detection (off by default) |
-| `--year-threshold FLOAT` | Stddev multiplier for era outliers when `--year` is set (default: `2.0`) |
-| `--explicit` | Enable explicit flag outlier detection (off by default) |
-| `--no-tags` | Disable tag-based Isolation Forest detection |
-| `--no-duration` | Disable duration outlier detection |
-| `--lastfm-api-key KEY` | Last.fm API key (overrides `.env`) |
-| `--client-id ID` | Spotify Client ID (overrides `.env`) |
-| `--token-file PATH` | Token storage location (default: `~/.spotify_classifier_tokens.json`) |
-| `--redirect-port INT` | OAuth callback port (default: `8888`) |
+Each track is scored against four independent detectors:
 
-### First run
+| Signal | Source | Method |
+|--------|--------|--------|
+| **Tag outlier** | Last.fm artist+track tags | Isolation Forest on tag vectors, trained on oldest-added tracks |
+| **Era outlier** | Spotify release date | Release year deviation from playlist median (disable by default) |
+| **Duration outlier** | Spotify track length | Track duration deviation from playlist median |
+| **Explicit outlier** | Spotify explicit flag | Contradicts playlist's explicit ratio (disable by default) |
 
-Your browser will open for Spotify OAuth. After authorizing, the token is saved to `~/.spotify_classifier_tokens.json` and silently refreshed on subsequent runs.
-
-Last.fm tags are cached to `~/.spotify_classifier_tag_cache.json`. A 140-track playlist takes ~60 seconds on the first run (~2 API calls per track at 5 req/s); subsequent runs on the same playlist are near-instant.
+A track is flagged if **any active detector** triggers. Tracks with no Last.fm tags are excluded from all scoring and listed separately.
 
 ## Correction Pipeline
 
-The tool includes an offline labeling loop for suppressing false positives over time.
-
-### Step 1 — Run with export
+### Step 1 — Generate exports
 
 ```bash
-python main.py --export-dir exports/
+python main.py --all --export-dir exports/
 ```
 
-Each playlist gets its own file: `exports/London.json`, `exports/Chill.json`, etc. Each flagged track gets `suggested_outlier: true` and `confirmed_outlier: null`. Re-running merges new results with existing labels — confirmed labels are never overwritten.
+Creates one JSON file per playlist (`exports/London.json`, `exports/Paris.json`, etc.) with:
+- `suggested_outlier: true` for flagged tracks
+- `confirmed_outlier: null` for manual review
+- All track features and statistical signals
 
-### Step 2 — Label false positives
+Re-running merges new results; existing labels are preserved.
 
+### Step 2 — Curate false positives
+
+**Batch session (all playlists):**
+```bash
+python curate.py exports/
+```
+
+**Single playlist:**
 ```bash
 python curate.py exports/London.json
 ```
 
-Walk through suggested outliers and press:
-
+**Interactive controls:**
 | Key | Action |
 |-----|--------|
 | `y` | Confirm outlier |
 | `n` | Mark as false positive |
-| `s` | Skip (review later) |
+| `s` | Skip |
 | `p` | Jump to next playlist |
 | `q` | Quit |
 
-Labels are saved atomically after each keypress.
+Labels are saved atomically after each keypress. Session ends with precision stats (% of suggestions confirmed).
 
-| Flag | Effect |
-|------|--------|
-| `--include-all` | Also surface non-flagged tracks to catch false negatives |
-| `--re-review` | Revisit tracks that already have a confirmed label |
-| `--playlist ID` | Limit the session to a specific playlist (repeatable) |
+**Curation flags:**
+- `--include-all`: Surface non-flagged tracks to catch false negatives
+- `--re-review`: Revisit already-labeled tracks
+- `--playlist ID`: Limit to one playlist (repeatable)
 
-At the end of each session, `curate.py` prints precision stats: how many of the model's suggestions you confirmed vs. rejected.
+### Step 3 — Suppress and deploy
 
-### Step 3 — Re-run with suppression
+**Re-run analysis:**
+```bash
+python main.py --all --export-dir exports/
+```
+
+Tracks marked `confirmed_outlier: false` are automatically suppressed from reports.
+
+**Deploy curated descriptions to Spotify:**
+```bash
+python deploy_descriptions.py
+```
+
+Reads descriptions from `output/DESCRIPTIONS.json` and updates Spotify playlists via API. Creates timestamped backup of current descriptions.
+
+## Advanced Options
 
 ```bash
-python main.py --export-dir exports/
+python main.py --all [FLAGS]
 ```
 
-Tracks you marked `confirmed_outlier: false` are automatically suppressed from the report. The export reflects the same set of flagged tracks as the HTML — only detectors you had enabled at run time contribute to `suggested_outlier`.
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--output-dir DIR` | `output/` | Report output directory |
+| `--format FMT` | `html` | Report format: `html`, `md`, or `txt` |
+| `--export-dir DIR` | — | Save ML exports here (required for curation) |
+| `--if-contamination N` | `0.05` | Isolation Forest contamination (0.0–1.0) |
+| `--duration-threshold N` | `2.0` | Duration stddev multiplier |
+| `--year` | disabled | Enable era detection |
+| `--year-threshold N` | `2.0` | Era stddev multiplier |
+| `--explicit` | disabled | Enable explicit ratio detection |
+| `--no-tags` | enabled | Disable tag-based detection |
+| `--no-duration` | enabled | Disable duration detection |
+| `--lastfm-api-key KEY` | `.env` | Override Last.fm API key |
+| `--client-id ID` | `.env` | Override Spotify Client ID |
+| `--token-file PATH` | `~/.spotify_classifier_tokens.json` | Token storage |
+| `--redirect-port N` | `8888` | OAuth callback port |
 
-## Project Structure
+## Architecture
 
 ```
-spotify-playlist-classifier/
-├── main.py                # Entry point, CLI args, orchestration
-├── curate.py              # Interactive false-positive labeler
+├── main.py                  # CLI, orchestration, analysis loop
+├── curate.py                # Interactive false-positive labeler
+├── deploy_descriptions.py   # Deploy curated descriptions to Spotify
+├── classifier/
+│   ├── auth.py              # PKCE OAuth, token refresh
+│   ├── spotify_client.py    # Playlist/track fetching, pagination
+│   ├── lastfm_client.py     # Tag fetching, disk cache
+│   ├── profiler.py          # Profile computation, track data
+│   ├── scorer.py            # Isolation Forest, stddev checks
+│   ├── report.py            # HTML/Markdown/text rendering
+│   └── export.py            # ML export format, label preservation
 ├── requirements.txt
 ├── .env.example
-├── classifier/
-│   ├── auth.py            # PKCE OAuth flow, token storage/refresh
-│   ├── spotify_client.py  # Spotify API: playlists, tracks, pagination
-│   ├── lastfm_client.py   # Last.fm API: artist/track tags, disk cache
-│   ├── profiler.py        # TrackData, PlaylistProfile, tag averages
-│   ├── scorer.py          # Isolation Forest, stddev checks, explanations
-│   ├── report.py          # Text/HTML/Markdown report rendering
-│   └── export.py          # ML training JSON export and merge
-└── docs/
-    └── spotify_AI-assistant_prompt.txt
+└── README.md
 ```
+
+**Data flow:**
+```
+Spotify API → Last.fm API → Tag vectors + track data
+                 ↓
+          Isolation Forest training (oldest 20–35%)
+                 ↓
+Score all tracks (4 signals) → HTML/Markdown/text reports
+                 ↓
+Export JSON (with labels for curation)
+                 ↓
+curate.py (manual review, label preservation)
+                 ↓
+Re-run suppresses false positives → deploy_descriptions.py
+```
+
+## Performance & Caching
+
+- **First run:** ~60 seconds for a 140-track playlist (2 API calls per track, 5 req/s throttled)
+- **Subsequent runs:** Near-instant (Last.fm tags cached to `~/.spotify_classifier_tag_cache.json`, expires 90 days)
+- **Large playlists:** Isolation Forest adapts — see `--if-contamination` to tune outlier sensitivity
 
 ## Known Limitations
 
-**Spotify stripped genres in February 2026.** `GET /v1/artists/{id}` no longer returns `genres`, `popularity`, or `followers` for Development Mode apps (requires 250,000 MAUs + registered business entity for Extended Quota Mode). Genre-based detection has been replaced by Last.fm tag vectors + Isolation Forest.
+**Spotify broke genres in Feb 2026.** The `GET /v1/artists/{id}` endpoint no longer returns `genres`, `popularity`, or `followers` for Development Mode apps. Replaced with Last.fm tag vectors + Isolation Forest.
 
-**Era and explicit detection are off by default.** Both signals generate false positives on thematic playlists (a 1960s track can fit a London vibe; an explicit track can fit a hip-hop playlist). Enable them with `--year` and `--explicit` for playlists where those dimensions are meaningful.
+**Era & explicit detection disabled by default.** Both create false positives on thematic playlists (a 1960s track fits "London vibe"; explicit tracks fit hip-hop). Enable with `--year` and `--explicit` only for playlists where those dimensions matter.
 
-**Last.fm tag coverage.** Niche or very new artists may have sparse or no tag data. Tracks with no tags are excluded from scoring and listed in the report under "No Tag Data."
+**Last.fm tag coverage varies.** Niche or very new artists may have sparse data. Tracks with no tags are excluded from scoring and listed as "No Tag Data" in reports.

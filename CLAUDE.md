@@ -22,8 +22,10 @@ python main.py --all --output-dir reports/        # save HTML reports for all pl
 python main.py --all --export-dir exports/        # also write per-playlist ML training exports
 python main.py --if-contamination 0.02            # stricter Isolation Forest threshold
 python main.py --no-tags                          # disable tag-based outlier detection
-python curate.py exports/London.json              # interactively label tracks
+python curate.py exports/                         # curate all playlists in directory (batch session)
+python curate.py exports/London.json              # curate single playlist
 python curate.py exports/London.json --include-all  # also hunt for false negatives
+python deploy_descriptions.py                     # deploy curated descriptions from output/DESCRIPTIONS.json to Spotify
 ```
 
 No build step. No test suite. Dependencies: `pip install -r requirements.txt` (`python-dotenv`, `scikit-learn`). Requires `SPOTIFY_CLIENT_ID` and `LASTFM_API_KEY` in `.env` or via CLI flags.
@@ -35,8 +37,12 @@ First run opens a browser for Spotify PKCE OAuth. Token saved to `~/.spotify_cla
 ### Data flow
 
 ```
-classifier/auth.py ──► SpotifyClient ──► LastFmClient ──► classifier/profiler.py ──► classifier/scorer.py ──► classifier/report.py
+classifier/auth.py ──► SpotifyClient ──► LastFmClient ──► classifier/profiler.py ──► classifier/scorer.py ──► classifier/report.py ────┐
                                                                                                            └──► classifier/export.py ──► curate.py
+                                                                                                                                           ↓
+                                                                                                     (curated descriptions) ← ← ← ─ output/DESCRIPTIONS.json
+                                                                                                                                           ↓
+                                                                                                                                    deploy_descriptions.py
 ```
 
 1. `load_or_refresh_token()` — PKCE OAuth, token cached to disk
@@ -71,7 +77,7 @@ Tracks with no Last.fm tags are excluded from scoring (not flagged as outliers).
 
 **Last.fm tag-based detection.** Spotify stripped genres, popularity, and followers from artist/track endpoints in February 2026. Tags come from `artist.getTopTags` + `track.getTopTags` via Last.fm API, merged by taking max weight per tag, normalized to 0-1. Artist tag cache (`LastFmClient._artist_tag_cache`) persists across playlists within a run.
 
-**Isolation Forest for tag outliers.** `scikit-learn IsolationForest` trains on the oldest `max(20% of playlist, 35)` tracks (by `added_at` timestamp). Full tag vocabulary is built from ALL tracks (not just training set) so contaminated training data remains distinguishable. Contamination defaults to 0.16 (~1σ one-tailed; upper bound, not guarantee), configurable via `--if-contamination`. A `score_gate` of -0.05 suppresses borderline predictions — tracks flagged by contamination but with a `decision_function` score above the gate are not marked as outliers, so coherent playlists naturally surface fewer flags.
+**Isolation Forest for tag outliers.** `scikit-learn IsolationForest` trains on the oldest `max(20% of playlist, 35)` tracks (by `added_at` timestamp). Full tag vocabulary is built from ALL tracks (not just training set) so contaminated training data remains distinguishable. Contamination defaults to 0.16 (~1σ one-tailed; upper bound, not guarantee), configurable via `--if-contamination`. An **adaptive score gate** suppresses borderline predictions: the effective gate is `max(score_gate, score_gate_fraction * most_extreme_outlier_score)`, where `score_gate=-0.05` and `score_gate_fraction=0.5`. On large, genre-coherent playlists (e.g. 442-track EDM playlist) IF scores are compressed near 0 — a fixed gate would suppress all predictions, so the fraction-based component scales the gate relative to the run's actual score range. The net effect: only the most-anomalous half of IF-predicted outliers are flagged; coherent playlists surface fewer flags without silencing the detector entirely.
 
 **Unclassifiable tracks** (no Last.fm tag data) are excluded from scoring and collected in `PlaylistProfile.unclassifiable_tracks` for a separate report section. They don't affect tag vectors or outlier detection.
 
@@ -85,13 +91,30 @@ Tracks with no Last.fm tags are excluded from scoring (not flagged as outliers).
 
 **Export label preservation.** `write_export()` merges by `playlist_id`; `confirmed_outlier` is only overwritten when the stored value is non-null. Re-running `main.py --export` never erases manual labels.
 
+**Curated descriptions.** `classifier/report.py` loads playlist descriptions from `output/DESCRIPTIONS.json` if present and renders them in terminal/HTML/Markdown reports. `deploy_descriptions.py` is a utility that reads from the same JSON and deploys descriptions back to Spotify via `PUT /playlists/{id}`. First run creates a timestamped backup of current descriptions.
+
 ### ML pipeline
 
 `--export training.json` produces JSON with per-track features (tags, duration, year, explicit) + `suggested_outlier` (statistical) + `confirmed_outlier: null` (to be filled). `curate.py` walks through suggested outliers sorted by flag count descending, writing y/n labels back after each keypress. Training target is `confirmed_outlier`; input features are track features + the `profile` block (exported per playlist) so a cross-playlist model has playlist context without retraining per playlist.
 
 ## Line Maps
 
-### classifier/lastfm_client.py (~218 lines)
+### classifier/auth.py (234 lines)
+| Lines | Section | Key contents |
+|-------|---------|--------------|
+| 1–19 | Imports + constants | base64, hashlib, secrets, threading, urllib, SPOTIFY_AUTH_URL, SPOTIFY_TOKEN_URL, SCOPE |
+| 22–27 | Exceptions | `AuthError` |
+| 30–38 | PKCE helpers | `generate_pkce_pair()` — verifier + base64url(sha256(verifier)) challenge |
+| 41–56 | Auth URL builder | `build_auth_url()` — PKCE S256 authorization endpoint |
+| 63–89 | Callback handler | `CallbackHandler` — HTTP GET handler for OAuth redirect, sends completion response |
+| 95–129 | PKCE flow | `run_pkce_flow()` — opens browser, waits for callback on local server, handles state/error |
+| 132–154 | Code exchange | `exchange_code()` — POST to token endpoint with PKCE verifier |
+| 161–176 | Token refresh | `refresh_access_token()` — refresh grant flow |
+| 183–225 | Token storage | `_save_tokens()` — atomic write to `~/.spotify_classifier_tokens.json`, retains old refresh if new not provided |
+| 197–225 | Main entry | `load_or_refresh_token()` — disk load → silent refresh → full PKCE flow |
+| 228–235 | Helpers | `_default_port()` — extract port from token file or default 8888 |
+
+### classifier/lastfm_client.py (218 lines)
 | Lines | Section | Key contents |
 |-------|---------|--------------|
 | 1–14 | Imports + constants | urllib, json, time, datetime, LASTFM_API_BASE, MAX_RETRIES, CACHE_TTL_DAYS |
@@ -103,53 +126,54 @@ Tracks with no Last.fm tags are excluded from scoring (not flagged as outliers).
 | 157–182 | Track tags | `get_track_tags` — cached by lowered `artist\x00track` key |
 | 184–218 | Tag merger | `get_merged_tags` — accepts `list[str]` artists; tries joined form first for track lookup, falls back to primary |
 
-### classifier/profiler.py (~144 lines)
+### classifier/profiler.py (147 lines)
 | Lines | Section | Key contents |
 |-------|---------|--------------|
 | 1–4 | Imports | statistics, dataclasses |
-| 11–22 | TrackData dataclass | tags, added_at, release_year, duration_ms, explicit |
-| 25–37 | PlaylistProfile dataclass | year/duration medians+stddevs, explicit_ratio, tag_averages |
+| 11–22 | TrackData dataclass | tags, added_at, release_year, duration_ms, explicit, artist_ids, artist_names, unclassifiable |
+| 25–37 | PlaylistProfile dataclass | year/duration medians+stddevs, explicit_ratio, tag_averages, unclassifiable_tracks |
 | 44–51 | extract_year | YYYY/YYYY-MM/YYYY-MM-DD parser |
 | 54–60 | _median_stddev | (median, pstdev) helper |
 | 67–100 | build_track_data | raw Spotify dicts + Last.fm tags → TrackData list |
-| 103–144 | build_playlist_profile | year, duration, explicit stats + tag_averages from classifiable tracks |
+| 103–147 | build_playlist_profile | year, duration, explicit stats + tag_averages from classifiable tracks |
 
-### classifier/scorer.py (~226 lines)
+### classifier/scorer.py (253 lines)
 | Lines | Section | Key contents |
 |-------|---------|--------------|
 | 1–5 | Imports | PlaylistProfile, TrackData |
 | 12–19 | ScoredTrack dataclass | 4 `is_*_outlier` flags + explanation |
 | 26–48 | build_tag_vectors | full-vocabulary vectors from all classifiable tracks |
-| 51–91 | run_isolation_forest | train on oldest max(20%, 35), predict all |
-| 98–107 | _stddev_outlier | threshold-based numeric outlier check |
-| 110–119 | _compute_explicit_outlier | ratio-based explicit flag check |
-| 122–172 | _build_explanation | distinctive/missing tag analysis + era/duration/explicit detail |
-| 179–216 | score_tracks | combines IF + stddev + explicit checks; leaves explanation="" |
-| 219–226 | build_explanations | fills explanation strings; call after _disable_flags() |
+| 51–105 | run_isolation_forest | train on oldest max(20%, 35), predict all; adaptive score gate |
+| 108–116 | _stddev_outlier | threshold-based numeric outlier check |
+| 119–128 | _compute_explicit_outlier | ratio-based explicit flag check |
+| 131–180 | _build_explanation | distinctive/missing tag analysis + era/duration/explicit detail |
+| 187–224 | score_tracks | combines IF + stddev + explicit checks; leaves explanation="" |
+| 227–253 | build_explanations | fills explanation strings; call after _disable_flags() |
 
-### classifier/report.py (~412 lines)
+### classifier/report.py (526 lines)
 | Lines | Section | Key contents |
 |-------|---------|--------------|
 | 1–10 | Imports | html, shutil, sys, textwrap, PlaylistProfile, ScoredTrack |
-| 17–39 | Shared helpers | `_bar`, `_term_width`, `_double_line`, `_single_line`, `_fmt_ms` |
-| 46–60 | render_header | playlist name + track counts |
-| 62–85 | render_theme_summary | year, duration, explicit stats |
-| 87–125 | render_outliers | 4-flag table with explanations |
-| 126–134 | render_unclassifiable | "no tag data" section |
-| 140–148 | _all_outliers | filter to tracks with any flag set |
-| 150–190 | format_report + print_report | terminal text output |
-| 192–228 | HTML constants + helpers | `_HTML_CSS`, `_h`, `_bar_html` |
-| 230–338 | format_html_report | self-contained HTML with 4-flag table |
-| 343–412 | format_markdown_report | pipe tables with 4 flags |
+| 16–25 | Curated descriptions | load from `output/DESCRIPTIONS.json` if available |
+| 30–50 | Shared helpers | `_bar`, `_term_width`, `_double_line`, `_single_line`, `_fmt_ms` |
+| 60–80 | render_header | playlist name + track counts |
+| 82–105 | render_theme_summary | year, duration, explicit stats + curated description if present |
+| 107–165 | render_outliers | 4-flag table with explanations |
+| 167–175 | render_unclassifiable | "no tag data" section |
+| 182–190 | _all_outliers | filter to tracks with any flag set |
+| 200–238 | format_report + print_report | terminal text output |
+| 240–280 | HTML constants + helpers | `_HTML_CSS`, `_h`, `_bar_html` |
+| 290–450 | format_html_report | self-contained HTML with 4-flag table + curated description |
+| 460–526 | format_markdown_report | pipe tables with 4 flags + curated description |
 
-### classifier/export.py (~104 lines)
+### classifier/export.py (104 lines)
 | Lines | Section | Key contents |
 |-------|---------|--------------|
 | 1–8 | Imports | json, datetime, PlaylistProfile, ScoredTrack |
 | 11–70 | build_playlist_export | profile dict + track features (tags, duration, year, explicit) + 4 flags |
 | 73–104 | write_export | merge by playlist_id, preserve confirmed_outlier labels |
 
-### classifier/spotify_client.py (~169 lines)
+### classifier/spotify_client.py (177 lines)
 | Lines | Section | Key contents |
 |-------|---------|--------------|
 | 1–12 | Imports + constants | urllib, SPOTIFY_API_BASE, ARTIST_BATCH_SIZE |
@@ -158,11 +182,11 @@ Tracks with no Last.fm tags are excluded from scoring (not flagged as outliers).
 | 41–72 | _get | HTTP GET with retry + rate-limit handling |
 | 78–82 | get_current_user_id | GET /me → current user's ID |
 | 84–100 | get_user_playlists | paginated playlist fetch, filtered to owner-only |
-| 92–123 | get_playlist_tracks | paginated track fetch with added_at |
-| 125–149 | get_artist_data + _fetch_artists_batch | individual artist fetches with cache |
-| 151–169 | get_audio_analysis | optional audio analysis (auto-disable on 403) |
+| 102–131 | get_playlist_tracks | paginated track fetch with added_at |
+| 133–157 | get_artist_data + _fetch_artists_batch | individual artist fetches with cache |
+| 159–177 | get_audio_analysis | optional audio analysis (auto-disable on 403) |
 
-### main.py (~350 lines)
+### main.py (359 lines)
 | Lines | Section | Key contents |
 |-------|---------|--------------|
 | 1–19 | Imports | classifier.auth/export/lastfm_client/profiler/report/scorer/spotify_client |
@@ -171,9 +195,16 @@ Tracks with no Last.fm tags are excluded from scoring (not flagged as outliers).
 | 103–132 | select_playlists_interactive | numbered list + comma input |
 | 139–189 | Helpers | `_safe_filename`, `_disable_flags`, `_apply_confirmed_labels` |
 | 196–225 | CLI argument definitions | --if-contamination, --no-tags, --lastfm-api-key |
-| 226–350 | Analysis loop | auth, Last.fm tag fetch, IF train/predict, _disable_flags → build_explanations, reports, export |
+| 226–359 | Analysis loop | auth, Last.fm tag fetch, IF train/predict, _disable_flags → build_explanations, reports, export |
 
-### curate.py (~319 lines)
+### deploy_descriptions.py (94 lines)
+| Lines | Section | Key contents |
+|-------|---------|--------------|
+| 1–19 | Imports + constants | json, urllib, datetime, Path, classifier.auth, SpotifyClient, DESCRIPTIONS_FILE, BACKUP_DIR |
+| 20–40 | PUT handler | `put_playlist_description()` — HTTP PUT to `/playlists/{id}` with description JSON |
+| 41–94 | main | load token, fetch playlists, backup current descriptions, load new descriptions from JSON, deploy with error handling |
+
+### curate.py (319 lines)
 | Lines | Section | Key contents |
 |-------|---------|--------------|
 | 1–8 | Imports | argparse, json, shutil |

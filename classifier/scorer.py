@@ -54,6 +54,7 @@ def run_isolation_forest(
     vectors: dict[str, list[float]],
     contamination: float = 0.16,
     score_gate: float = -0.05,
+    score_gate_fraction: float = 0.5,
 ) -> dict[str, bool]:
     """
     Train Isolation Forest on oldest max(20%, 35) tracks, predict all.
@@ -61,8 +62,14 @@ def run_isolation_forest(
 
     contamination sets the maximum outlier fraction (upper bound, not guarantee).
     score_gate suppresses borderline predictions: tracks flagged by contamination
-    but with a decision_function score above score_gate are not marked as outliers.
-    Scores are negative-is-anomalous; 0 is the decision boundary.
+    but with a decision_function score above the effective gate are not marked as
+    outliers.  Scores are negative-is-anomalous; 0 is the decision boundary.
+
+    The effective gate is adaptive: max(score_gate, score_gate_fraction * most_extreme),
+    where most_extreme is the lowest (most anomalous) outlier score in this run.
+    This prevents score_gate from wiping out all predictions on large, genre-coherent
+    playlists where IF scores are compressed near 0.
+    score_gate_fraction=0.5 means "only flag the most-anomalous half of IF predictions".
     """
     classifiable = [t for t in tracks if not t.unclassifiable and t.id in vectors]
 
@@ -94,9 +101,19 @@ def run_isolation_forest(
     predictions = model.predict(all_vectors)
     scores = model.decision_function(all_vectors)
 
-    # -1 = outlier, 1 = inlier; suppress borderline outliers via score_gate
+    # Adaptive gate: scale the minimum acceptable anomaly score relative to the
+    # most extreme outlier score in this run, so coherent playlists with compressed
+    # score distributions are not fully suppressed by a fixed absolute threshold.
+    outlier_scores = [s for pred, s in zip(predictions, scores) if pred == -1]
+    if outlier_scores:
+        most_extreme = min(outlier_scores)  # most negative = most anomalous
+        effective_gate = max(score_gate, score_gate_fraction * most_extreme)
+    else:
+        effective_gate = score_gate
+
+    # -1 = outlier, 1 = inlier; suppress borderline outliers via effective_gate
     return {
-        tid: bool(pred == -1 and score <= score_gate)
+        tid: bool(pred == -1 and score <= effective_gate)
         for tid, pred, score in zip(all_ids, predictions, scores)
     }
 

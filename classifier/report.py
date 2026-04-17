@@ -1,13 +1,27 @@
 from __future__ import annotations
 
 import html as html_module
+import json
+import re
 import shutil
 import sys
 import textwrap
+from pathlib import Path
 from typing import IO
 
 from .profiler import PlaylistProfile, TrackData
 from .scorer import ScoredTrack
+
+
+# Load curated playlist descriptions from output/DESCRIPTIONS.json if available
+_CURATED_DESCRIPTIONS: dict[str, str] = {}
+_desc_path = Path(__file__).parent.parent / "output" / "DESCRIPTIONS.json"
+if _desc_path.exists():
+    try:
+        with open(_desc_path, encoding="utf-8") as f:
+            _CURATED_DESCRIPTIONS = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +228,9 @@ tr:hover td { background: #16213e; }
 .flag { display: inline-block; background: #2d3436; color: #a29bfe; padding: .1rem .35rem; border-radius: 3px; font-size: .78em; margin: .1rem; }
 .expl { color: #b2bec3; font-size: .82em; margin-top: .2rem; }
 .unclassifiable { color: #636e72; font-size: .88em; }
+.desc-block { background: #16213e; border-left: 3px solid #74b9ff; padding: .5rem .8rem; border-radius: 3px; margin: .6rem 0; font-size: .9em; }
+.desc-label { color: #b2bec3; font-size: .78em; margin-bottom: .15rem; }
+.desc-suggested { color: #a29bfe; }
 """.strip()
 
 
@@ -229,6 +246,70 @@ def _bar_html(fraction: float, width_px: int = 180) -> str:
         f'<span class="bar" style="width:{filled}px"></span>'
         f'<span class="bar-bg" style="width:{empty}px"></span>'
     )
+
+
+# Tags that describe geographic origin rather than genre — excluded from suggestions.
+_GEO_TAGS = {
+    "usa", "american", "japanese", "chinese", "china", "taiwanese", "korean",
+    "british", "uk", "english", "french", "german", "australian", "netherlands",
+    "dutch", "swedish", "norwegian", "danish", "finnish", "canadian",
+    "brazilian", "mexican", "spanish", "italian", "russian", "thai",
+    "vietnamese", "indian", "portuguese", "polish",
+}
+
+# Abbreviations resolved to their canonical form for deduplication only.
+_TAG_ALIASES = {
+    "dnb": "drum and bass",
+    "d&b": "drum and bass",
+}
+
+
+def _normalize_for_dedup(tag: str) -> str:
+    canonical = _TAG_ALIASES.get(tag.lower(), tag.lower())
+    return re.sub(r"[-\s&]", "", canonical)
+
+
+def _title_tag(tag: str) -> str:
+    """Title-case a tag but keep letters that follow digits lowercase (e.g. '80s' not '80S')."""
+    titled = tag.title()
+    return re.sub(r"(?<=\d)([A-Z])", lambda m: m.group(1).lower(), titled)
+
+
+def _suggest_description(profile: PlaylistProfile) -> str:
+    """
+    Generate a suggested playlist description from profile data.
+    Returns a curated description if available in DESCRIPTIONS.json, otherwise
+    auto-generates one from the top tags (by average weight) and year era.
+    Filters geographic origin tags and deduplicates near-synonyms (e.g. hip-hop/hip hop,
+    k-pop/kpop, drum and bass/dnb). Tags with >= 4 space-separated words are skipped
+    (noise like 'better than selena gomez').
+    """
+    # Return curated description if available
+    if profile.playlist_name in _CURATED_DESCRIPTIONS:
+        return _CURATED_DESCRIPTIONS[profile.playlist_name]
+
+    # Auto-generate fallback description
+    if not profile.tag_averages:
+        return ""
+    top = sorted(profile.tag_averages.items(), key=lambda x: x[1], reverse=True)
+    seen_norm: set[str] = set()
+    parts: list[str] = []
+    for tag, _weight in top:
+        if tag.lower() in _GEO_TAGS:
+            continue
+        if len(tag.split()) >= 4:
+            continue
+        norm = _normalize_for_dedup(tag)
+        if norm in seen_norm:
+            continue
+        seen_norm.add(norm)
+        parts.append(_title_tag(tag))
+        if len(parts) == 5:
+            break
+    if profile.year_median is not None:
+        decade = int(profile.year_median) // 10 * 10
+        parts.append(f"{decade}s")
+    return " \u00b7 ".join(parts)
 
 
 def format_html_report(
@@ -256,6 +337,24 @@ def format_html_report(
         f"{profile.classifiable_count} classifiable \u00b7 "
         f"{len(unclassifiable)} no tag data</p>",
     ]
+
+    # --- Description block ---
+    suggested = _suggest_description(profile)
+    if profile.description or suggested:
+        sections.append("<div>")
+        if profile.description:
+            sections.append(
+                f"<div class='desc-block'>"
+                f"<div class='desc-label'>Current description</div>"
+                f"{_h(profile.description)}</div>"
+            )
+        if suggested:
+            sections.append(
+                f"<div class='desc-block'>"
+                f"<div class='desc-label'>Suggested description</div>"
+                f"<span class='desc-suggested'>{_h(suggested)}</span></div>"
+            )
+        sections.append("</div>")
 
     # --- Theme summary ---
     sections.append("<h2>Theme Summary</h2><div class='stat-grid'>")
