@@ -64,6 +64,28 @@ def _save(data: list[dict], path: Path) -> None:
     tmp.replace(path)
 
 
+def _save_to_source_files(
+    all_data: list[dict],
+    export_path: Path,
+    source_files: dict[str, Path],
+) -> None:
+    """Save data back to original source files (for directory input) or single file."""
+    if export_path.is_dir():
+        # Group playlists by source file
+        files_to_save: dict[Path, list[dict]] = {}
+        for playlist in all_data:
+            pl_id = playlist["playlist_id"]
+            src_file = source_files.get(pl_id, export_path)
+            if src_file not in files_to_save:
+                files_to_save[src_file] = []
+            files_to_save[src_file].append(playlist)
+        # Save each file
+        for src_file, playlists in files_to_save.items():
+            _save(playlists, src_file)
+    else:
+        _save(all_data, export_path)
+
+
 # ---------------------------------------------------------------------------
 # Display helpers
 # ---------------------------------------------------------------------------
@@ -176,6 +198,7 @@ def _curate_playlist(
     re_review: bool,
     export_path: Path,
     all_data: list[dict],
+    source_files: dict[str, Path],
 ) -> tuple[int, int, int, bool]:
     """
     Interactive curation for one playlist.
@@ -219,13 +242,13 @@ def _curate_playlist(
                 track_lookup[track["track_id"]]["confirmed_outlier"] = True
                 confirmed_yes += 1
                 print("y  \u2192 outlier")
-                _save(all_data, export_path)
+                _save_to_source_files(all_data, export_path, source_files)
                 break
             elif key == "n":
                 track_lookup[track["track_id"]]["confirmed_outlier"] = False
                 confirmed_no += 1
                 print("n  \u2192 not an outlier")
-                _save(all_data, export_path)
+                _save_to_source_files(all_data, export_path, source_files)
                 break
             elif key == "s":
                 skipped += 1
@@ -248,9 +271,9 @@ def _curate_playlist(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Interactively label tracks in a playlist export JSON."
+        description="Interactively label tracks in a playlist export JSON or directory of exports."
     )
-    parser.add_argument("path", metavar="PATH", help="Export JSON file to curate")
+    parser.add_argument("path", metavar="PATH", help="Export JSON file or directory of JSON files to curate")
     parser.add_argument("--playlist", metavar="ID", action="append",
                         help="Only review this playlist ID (repeatable)")
     parser.add_argument("--include-all", action="store_true",
@@ -259,12 +282,30 @@ def main() -> None:
                         help="Revisit tracks that already have a confirmed_outlier label")
     args = parser.parse_args()
 
-    export_path = Path(args.path)
-    if not export_path.exists():
-        print(f"ERROR: file not found: {export_path}")
+    path = Path(args.path)
+    if not path.exists():
+        print(f"ERROR: path not found: {path}")
         sys.exit(1)
 
-    all_data = _load(export_path)
+    # Load from file or directory
+    source_files: dict[str, Path] = {}  # playlist_id -> source file path
+    if path.is_dir():
+        all_data = []
+        export_files = sorted(path.glob("*.json"))
+        if not export_files:
+            print(f"ERROR: no JSON files found in {path}")
+            sys.exit(1)
+        for export_file in export_files:
+            file_data = _load(export_file)
+            for playlist in file_data:
+                source_files[playlist["playlist_id"]] = export_file
+            all_data.extend(file_data)
+        export_path = path  # use directory as reference for saving
+    else:
+        all_data = _load(path)
+        export_path = path
+        for playlist in all_data:
+            source_files[playlist["playlist_id"]] = path
 
     # Filter to requested playlists
     if args.playlist:
@@ -285,6 +326,7 @@ def main() -> None:
             re_review=args.re_review,
             export_path=export_path,
             all_data=all_data,
+            source_files=source_files,
         )
         total_yes += cy
         total_no += cn

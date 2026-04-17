@@ -22,7 +22,8 @@ python main.py --all --output-dir reports/        # save HTML reports for all pl
 python main.py --all --export-dir exports/        # also write per-playlist ML training exports
 python main.py --if-contamination 0.02            # stricter Isolation Forest threshold
 python main.py --no-tags                          # disable tag-based outlier detection
-python curate.py exports/London.json              # interactively label tracks
+python curate.py exports/                         # curate all playlists in directory (batch session)
+python curate.py exports/London.json              # curate single playlist
 python curate.py exports/London.json --include-all  # also hunt for false negatives
 python deploy_descriptions.py                     # deploy curated descriptions from output/DESCRIPTIONS.json to Spotify
 ```
