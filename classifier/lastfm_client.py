@@ -17,9 +17,10 @@ CACHE_TTL_EMPTY_DAYS = 7  # empty results expire sooner — artist may get tagge
 
 
 class LastFmClient:
-    def __init__(self, api_key: str, cache_path: Path | None = None) -> None:
+    def __init__(self, api_key: str, cache_path: Path | None = None, refresh_mode: bool = False) -> None:
         self._api_key = api_key
         self._cache_path = cache_path
+        self._refresh_mode = refresh_mode
         # key -> {"tags": [(name, weight), ...], "fetched_at": ISO str}
         self._artist_tag_cache: dict[str, dict] = {}
         self._track_tag_cache: dict[str, dict] = {}
@@ -33,6 +34,8 @@ class LastFmClient:
 
     def _is_expired(self, entry: dict) -> bool:
         """True if the cache entry is too old to trust."""
+        if self._refresh_mode:
+            return True
         fetched_at = entry.get("fetched_at", "")
         if not fetched_at:
             return True
@@ -71,7 +74,12 @@ class LastFmClient:
             return
         tmp = self._cache_path.with_suffix(".tmp")
         try:
-            data = {"artists": self._artist_tag_cache, "tracks": self._track_tag_cache}
+            # Convert tuples to lists for JSON serialization
+            artist_data = {k: {**v, "tags": [list(t) for t in v.get("tags", [])]}
+                          for k, v in self._artist_tag_cache.items()}
+            track_data = {k: {**v, "tags": [list(t) for t in v.get("tags", [])]}
+                         for k, v in self._track_tag_cache.items()}
+            data = {"artists": artist_data, "tracks": track_data}
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f)
             tmp.replace(self._cache_path)

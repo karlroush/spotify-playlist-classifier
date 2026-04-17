@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -42,6 +43,7 @@ class Config:
     output_dir: Path | None = None
     output_format: str = "html"         # "html" | "md" | "txt"
     export_dir: Path | None = None
+    refresh_tags: bool = False
 
 
 def load_config(args: argparse.Namespace) -> Config:
@@ -94,6 +96,7 @@ def load_config(args: argparse.Namespace) -> Config:
         output_dir=output_dir,
         output_format=output_format,
         export_dir=export_dir,
+        refresh_tags=args.refresh_tags,
     )
 
 
@@ -214,6 +217,7 @@ def main() -> None:
     parser.add_argument("--no-tags", action="store_true", help="Disable tag-based outlier detection")
     parser.add_argument("--no-duration", action="store_true", help="Disable duration outlier detection")
     parser.add_argument("--explicit", action="store_true", help="Enable explicit flag outlier detection (off by default)")
+    parser.add_argument("--refresh-tags", action="store_true", help="Force refresh Last.fm tag cache, skip TTL checks")
 
     # Auth / output
     parser.add_argument("--client-id", metavar="ID", help="Spotify Client ID (overrides .env)")
@@ -239,6 +243,7 @@ def main() -> None:
     lastfm = LastFmClient(
         config.lastfm_api_key,
         cache_path=Path.home() / ".spotify_classifier_tag_cache.json",
+        refresh_mode=config.refresh_tags,
     )
 
     # --- Playlist selection ---
@@ -275,14 +280,16 @@ def main() -> None:
     print(f"\nAnalyzing {len(chosen)} playlist(s)...\n")
 
     _EXT = {"html": ".html", "md": ".md", "txt": ".txt"}
+    batch_start = time.time()
 
     # --- Per-playlist analysis ---
-    for playlist in chosen:
+    for idx, playlist in enumerate(chosen, start=1):
         pl_id = playlist.get("id", "")
         pl_name = playlist.get("name", "(unnamed)")
+        pl_start = time.time()
 
         try:
-            print(f"  Fetching tracks for: {pl_name}")
+            print(f"[{idx}/{len(chosen)}] {pl_name}...")
             raw_tracks = client.get_playlist_tracks(pl_id)
 
             # Fetch Last.fm tags for each track
@@ -347,6 +354,8 @@ def main() -> None:
                 else:
                     print_report(profile, scored, file=f, suppressed_count=suppressed)
             print(f"  Saved: {out_path}")
+            pl_elapsed = time.time() - pl_start
+            print(f"  Completed in {pl_elapsed:.1f}s\n")
             print_report(profile, scored, suppressed_count=suppressed)
 
         except SpotifyAPIError as exc:

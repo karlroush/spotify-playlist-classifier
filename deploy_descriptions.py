@@ -63,6 +63,7 @@ def main():
         backup_data[playlist["name"]] = playlist.get("description", "")
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     backup_file = BACKUP_DIR / f"DESCRIPTIONS_backup_{timestamp}.json"
     backup_file.write_text(json.dumps(backup_data, indent=2))
     print(f"[OK] Backed up current descriptions to {backup_file.name}")
